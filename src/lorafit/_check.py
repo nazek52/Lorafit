@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import stat
 from dataclasses import dataclass, field
 from math import prod
@@ -29,7 +30,6 @@ UNSUPPORTED_CONFIG = (
     "lora_bias",
     "megatron_config",
     "modules_to_save",
-    "rank_pattern",
     "target_parameters",
     "trainable_token_indices",
     "use_bdlora",
@@ -93,6 +93,37 @@ def _rank(config: dict[str, object], path: Path) -> int:
     if type(rank) is not int or rank < 1:
         raise InputError("invalid_config", path, "expected a positive integer for rank 'r'")
     return rank
+
+
+def _rank_pattern(config: dict[str, object], path: Path) -> list[tuple[str, int]]:
+    raw = config.get("rank_pattern")
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        raise InputError("invalid_config", path, "expected a mapping for 'rank_pattern'")
+    result: list[tuple[str, int]] = []
+    for pattern, value in raw.items():
+        if not isinstance(pattern, str) or not pattern:
+            raise InputError("invalid_config", path, "expected non-empty string keys in 'rank_pattern'")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise InputError("invalid_config", path, f"invalid regex in 'rank_pattern': {pattern!r}") from exc
+        if type(value) is not int or value < 1:
+            raise InputError(
+                "invalid_config",
+                path,
+                f"expected a positive integer rank for pattern {pattern!r}",
+            )
+        result.append((pattern, value))
+    return result
+
+
+def _module_rank(module: str, default_rank: int, rank_pattern: list[tuple[str, int]]) -> int:
+    for pattern, value in rank_pattern:
+        if pattern == module or re.match(rf"(?:.*\.)?{pattern}$", module):
+            return value
+    return default_rank
 
 
 def _groups(header: Header, path: Path, report: Report) -> dict[str, dict[str, Tensor]]:
@@ -211,7 +242,14 @@ def _check_pair(
         report.matched += 1
 
 
-def _match(path: Path, groups: dict[str, dict[str, Tensor]], rank: int, report: Report) -> None:
+def _match(
+    path: Path,
+    groups: dict[str, dict[str, Tensor]],
+    rank: int,
+    report: Report,
+    rank_pattern: list[tuple[str, int]] | None = None,
+) -> None:
+    patterns = rank_pattern or []
     by_path: dict[Path, list[str]] = {}
     sharded = path.name.endswith(INDEX_SUFFIX)
     if sharded:
@@ -225,7 +263,9 @@ def _match(path: Path, groups: dict[str, dict[str, Tensor]], rank: int, report: 
                 report.findings.append(
                     Finding("target_missing", f"{key!r} is absent from the base index", module)
                 )
-                _check_pair(module, groups[module], rank, None, report)
+                _check_pair(
+                    module, groups[module], _module_rank(module, rank, patterns), None, report
+                )
             else:
                 by_path.setdefault(path.parent / shard, []).append(module)
     else:
@@ -256,7 +296,9 @@ def _match(path: Path, groups: dict[str, dict[str, Tensor]], rank: int, report: 
                 )
                 if sharded:
                     report.incomplete = True
-            _check_pair(module, groups[module], rank, weight, report)
+            _check_pair(
+                module, groups[module], _module_rank(module, rank, patterns), weight, report
+            )
         del header
 
 
@@ -268,6 +310,7 @@ def check(base: Path, adapter: Path) -> Report:
         config, size = read_json(config_path, MAX_CONFIG, "invalid_config")
         report.metadata_bytes += size
         rank = _rank(config, config_path)
+        rank_pattern = _rank_pattern(config, config_path)
         name = config.get("base_model_name_or_path")
         report.declared_base = name if isinstance(name, str) and name else None
         adapter_path = adapter / "adapter_model.safetensors"
@@ -275,7 +318,7 @@ def check(base: Path, adapter: Path) -> Report:
         report.metadata_bytes += header.bytes_read
         groups = _groups(header, adapter_path, report)
         report.modules = len(groups)
-        _match(_select_base(base), groups, rank, report)
+        _match(_select_base(base), groups, rank, report, rank_pattern)
     except InputError as exc:
         report.record_input_error(exc)
     return report

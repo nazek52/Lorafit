@@ -185,3 +185,33 @@ def test_ambiguous_base_needs_explicit_choice(demo: tuple[Path, Path, Path]) -> 
     write_weights(base / "model.safetensors", {Q + ".weight": (8, 16), V + ".weight": (8, 16)})
     assert [item.code for item in check(base, adapter).findings] == ["ambiguous_base"]
     assert check(base / "model.safetensors", adapter).exit_code == 0
+
+
+def test_rank_pattern_per_module_ranks(demo: tuple[Path, Path, Path]) -> None:
+    base, _, adapter = demo
+    write_config(adapter / "adapter_config.json", r=4, rank_pattern={r"q_proj": 8})
+    write_weights(
+        adapter / "adapter_model.safetensors",
+        {
+            f"base_model.model.{Q}.lora_A.weight": (8, 16),
+            f"base_model.model.{Q}.lora_B.weight": (8, 8),
+            f"base_model.model.{V}.lora_A.weight": (4, 16),
+            f"base_model.model.{V}.lora_B.weight": (8, 4),
+        },
+    )
+    report = check(base, adapter)
+    assert report.exit_code == 0
+    assert report.status == "match"
+
+
+def test_rank_pattern_mismatch_and_invalid_config(demo: tuple[Path, Path, Path]) -> None:
+    base, _, adapter = demo
+    write_config(adapter / "adapter_config.json", r=4, rank_pattern={r"q_proj": 8})
+    report = check(base, adapter)
+    assert report.exit_code == 1
+    assert any(item.code == "rank_mismatch" and item.module == Q for item in report.findings)
+
+    write_config(adapter / "adapter_config.json", r=4, rank_pattern={"[invalid": 8})
+    bad = check(base, adapter)
+    assert bad.exit_code == 2
+    assert [item.code for item in bad.findings] == ["invalid_config"]
