@@ -133,9 +133,18 @@ def _select_base(path: Path) -> Path:
                 raise InputError(
                     "ambiguous_base", path, "both weight layouts exist; pass an explicit file"
                 )
-            raise InputError(
-                "base_not_found", path, "expected model.safetensors or model.safetensors.index.json"
-            )
+            variants = sorted(
+                entry.name
+                for entry in path.iterdir()
+                if entry.name.endswith((".safetensors", INDEX_SUFFIX))
+            )[:3]
+            detail = "expected model.safetensors or model.safetensors.index.json"
+            if variants:
+                detail = (
+                    f"{detail}; found {', '.join(variants)}; "
+                    "pass an explicit file (e.g. lorafit check <adapter> <base_file>)"
+                )
+            raise InputError("base_not_found", path, detail)
     except FileNotFoundError as exc:
         raise InputError("file_missing", path, "base path is missing") from exc
     except (OSError, ValueError) as exc:

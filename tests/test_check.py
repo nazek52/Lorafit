@@ -185,3 +185,26 @@ def test_ambiguous_base_needs_explicit_choice(demo: tuple[Path, Path, Path]) -> 
     write_weights(base / "model.safetensors", {Q + ".weight": (8, 16), V + ".weight": (8, 16)})
     assert [item.code for item in check(base, adapter).findings] == ["ambiguous_base"]
     assert check(base / "model.safetensors", adapter).exit_code == 0
+
+
+def test_base_not_found_suggests_variant_filenames(tmp_path: Path, demo: tuple[Path, Path, Path]) -> None:
+    _, _, adapter = demo
+    variant_dir = tmp_path / "variants"
+    variant_dir.mkdir()
+    for name in (
+        "model.fp16.safetensors",
+        "model.bf16.safetensors",
+        "model.int8.safetensors",
+        "model.zz.safetensors",
+    ):
+        write_weights(variant_dir / name, {Q + ".weight": (8, 16), V + ".weight": (8, 16)})
+    report = check(variant_dir, adapter)
+    assert report.exit_code == 2
+    assert report.status == "incomplete"
+    assert [item.code for item in report.findings] == ["base_not_found"]
+    detail = report.findings[0].detail
+    assert "model.bf16.safetensors" in detail
+    assert "model.fp16.safetensors" in detail
+    assert "model.int8.safetensors" in detail
+    assert "model.zz.safetensors" not in detail
+    assert "lorafit check" in detail
